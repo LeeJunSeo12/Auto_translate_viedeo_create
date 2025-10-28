@@ -30,6 +30,11 @@ class Settings:
     use_sadtalker: bool = os.getenv("USE_SADTALKER", "false").lower() == "true"
     sadtalker_repo: str = os.getenv("SADTALKER_REPO", "/app/extern/SadTalker")
     sadtalker_checkpoint_dir: str = os.getenv("SADTALKER_CKPT_DIR", "/app/extern/SadTalker/checkpoints")
+    lipsync_provider: str = os.getenv("LIPSYNC_PROVIDER", "none").lower()  # one of: none, sadtalker, wav2lip
+    wav2lip_repo: str = os.getenv("WAV2LIP_REPO", "/app/extern/Wav2Lip")
+    wav2lip_checkpoint_path: str = os.getenv("WAV2LIP_CKPT", "/app/extern/Wav2Lip/checkpoints/wav2lip_gan.pth")
+    sync_api_key: Optional[str] = os.getenv("SYNC_API_KEY")
+    sync_base_url: str = os.getenv("SYNC_BASE_URL", "https://api.sync.so")
 
 
 settings = Settings()

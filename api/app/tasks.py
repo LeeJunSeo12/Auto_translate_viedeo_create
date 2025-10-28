@@ -9,10 +9,14 @@ from app.celery_app import celery_app
 from app.config import settings
 from app.providers.factory import get_tts_provider
 from app.utils.logging import get_logger
-from app.utils.media import download_video, extract_audio, mux_video_audio
+from app.utils.media import download_video, extract_audio, mux_video_audio, extract_first_frame
 from app.utils.progress import append_log, set_result, set_status
 from app.utils.storage import job_paths
 from app.utils.text import split_text_for_tts, translate_to_korean_natural, contains_hangul
+from app.utils.sadtalker import ensure_wav_16k_mono as ensure_wav_16k_mono_sad
+from app.utils.sadtalker import run_sadtalker, add_subtitles_soft
+from app.utils.wav2lip import ensure_wav_16k_mono as ensure_wav_16k_mono_w2l
+from app.utils.wav2lip import run_wav2lip
 
 
 logger = get_logger(__name__)
@@ -153,9 +157,33 @@ def process_job(self, job_id: str, youtube_url: str, options: Dict | None = None
         chunks = split_text_for_tts(ko_full)
         provider.synthesize(chunks, Path(paths["tts_audio"]))
 
-        set_status(job_id, "RUNNING", progress=80)
-        append_log(job_id, "Muxing video + KR audio + subtitles...")
-        mux_video_audio(Path(paths["video"]), Path(paths["tts_audio"]), Path(paths["out_video"]), Path(paths["subs"]))
+        # If lipsync provider is enabled, generate a lip-synced video using the TTS audio
+        provider = (settings.lipsync_provider or ("sadtalker" if settings.use_sadtalker else "none")).lower()
+        if provider == "sadtalker":
+            set_status(job_id, "RUNNING", progress=85)
+            append_log(job_id, "Running SadTalker for lip-sync video generation...")
+            ref_image = Path(paths["work"]) / "sadtalker_ref.png"
+            extract_first_frame(Path(paths["video"]), ref_image)
+            wav16k = Path(paths["work"]) / "tts_16k.wav"
+            ensure_wav_16k_mono_sad(Path(paths["tts_audio"]), wav16k)
+            tmp_sadtalker_out = Path(paths["work"]) / "sadtalker_output.mp4"
+            run_sadtalker(ref_image, wav16k, tmp_sadtalker_out, preprocess="full", still=True, size=256)
+            set_status(job_id, "RUNNING", progress=90)
+            append_log(job_id, "Attaching subtitles to SadTalker video...")
+            add_subtitles_soft(tmp_sadtalker_out, Path(paths["subs"]), Path(paths["out_video"]))
+        elif provider == "wav2lip":
+            set_status(job_id, "RUNNING", progress=85)
+            append_log(job_id, "Running Wav2Lip for lip-sync video generation...")
+            # 상용 Sync API가 설정되어 있으면 원격 실행, 아니면 로컬 체크포인트로 실행
+            tmp_w2l_out = Path(paths["work"]) / "wav2lip_output.mp4"
+            run_wav2lip(Path(paths["video"]), Path(paths["tts_audio"]), tmp_w2l_out)
+            set_status(job_id, "RUNNING", progress=90)
+            append_log(job_id, "Attaching subtitles to Wav2Lip video...")
+            add_subtitles_soft(tmp_w2l_out, Path(paths["subs"]), Path(paths["out_video"]))
+        else:
+            set_status(job_id, "RUNNING", progress=80)
+            append_log(job_id, "Muxing video + KR audio + subtitles...")
+            mux_video_audio(Path(paths["video"]), Path(paths["tts_audio"]), Path(paths["out_video"]), Path(paths["subs"]))
 
         set_status(job_id, "DONE", progress=100)
         result_url = f"/results/{job_id}/translated_video.mp4"
