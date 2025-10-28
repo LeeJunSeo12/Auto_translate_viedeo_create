@@ -1,0 +1,32 @@
+# Node
+node_modules/
+.next/
+.vercel/
+web/.turbo/
+web/.next/
+web/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+api/.venv/
+api/.pytest_cache/
+api/.mypy_cache/
+
+# Data
+/data/results/
+/data/work/
+/data/tmp/
+
+# Logs
+logs/
+*.log
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
