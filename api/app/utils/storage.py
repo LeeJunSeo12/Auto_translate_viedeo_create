@@ -20,7 +20,7 @@ def job_paths(job_id: str) -> dict:
         "work": work,
         "results": results,
         "video": work / "input_video.mp4",
-        "audio": work / "input_audio.mp3",
+        "audio": work / "input_audio.wav",
         "subs": work / "subtitles_ko.srt",
         "ko_text": work / "korean_text.txt",
         "tts_audio": work / "korean_audio.mp3",

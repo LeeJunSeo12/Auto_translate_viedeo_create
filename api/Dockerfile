@@ -13,7 +13,10 @@ RUN apt-get update ; apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Install CUDA-enabled nightly PyTorch (CUDA 13.0) then project deps
+RUN python -m pip install --upgrade pip \
+  ; pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu130 \
+  ; pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 

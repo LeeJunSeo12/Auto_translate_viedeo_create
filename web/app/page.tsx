@@ -15,6 +15,7 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [options, setOptions] = useState<any>(undefined);
   const [dropActive, setDropActive] = useState(false);
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
   const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -41,7 +42,7 @@ export default function HomePage() {
     }
     try {
       setLoading(true);
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/jobs`, {
+      const res = await fetch(`${apiBase}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ youtubeUrl: url, options }),

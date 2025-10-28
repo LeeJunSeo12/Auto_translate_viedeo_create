@@ -12,24 +12,36 @@ from app.utils.logging import get_logger
 from app.utils.media import download_video, extract_audio, mux_video_audio
 from app.utils.progress import append_log, set_result, set_status
 from app.utils.storage import job_paths
-from app.utils.text import split_text_for_tts
+from app.utils.text import split_text_for_tts, translate_to_korean_natural, contains_hangul
 
 
 logger = get_logger(__name__)
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 3})
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 3}, name="process_job")
 def process_job(self, job_id: str, youtube_url: str, options: Dict | None = None) -> str:
     paths = job_paths(job_id)
 
     try:
         set_status(job_id, "RUNNING", progress=1)
+        append_log(job_id, f"Job accepted. options={json.dumps(options or {})}")
         append_log(job_id, "Downloading video...")
         download_video(youtube_url, Path(paths["video"]))
 
         set_status(job_id, "RUNNING", progress=10)
         append_log(job_id, "Extracting audio...")
-        extract_audio(Path(paths["video"]), Path(paths["audio"]))
+        try:
+            extract_audio(Path(paths["video"]), Path(paths["audio"]))
+        except Exception as e:  # noqa: BLE001
+            append_log(job_id, f"Audio extraction failed: {e}. Trying ffmpeg re-mux to MP4 with audio...")
+            # Some DASH videos may download as video-only; try merging bestaudio via ffmpeg once
+            # Attempt to let ffmpeg copy streams without re-encoding, then retry extraction
+            import subprocess
+            tmp_fixed = Path(paths["work"]) / "fixed_with_audio.mp4"
+            subprocess.run([
+                "ffmpeg","-y","-i", str(paths["video"]), "-c","copy", str(tmp_fixed)
+            ], check=False)
+            extract_audio(tmp_fixed, Path(paths["audio"]))
 
         set_status(job_id, "RUNNING", progress=25)
         append_log(job_id, f"Loading STT model {settings.whisper_model} (USE_WHISPERX={settings.use_whisperx})...")
@@ -44,6 +56,11 @@ def process_job(self, job_id: str, youtube_url: str, options: Dict | None = None
                 import whisperx  # type: ignore
 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+                num_devices = torch.cuda.device_count() if device == "cuda" else 0
+                if device == "cuda":
+                    name = torch.cuda.get_device_name(0)
+                    cc = torch.cuda.get_device_capability(0)
+                    append_log(job_id, f"CUDA devices={num_devices}, name={name}, capability={cc}")
                 compute_type = "float16" if device == "cuda" else "int8"
                 append_log(job_id, f"WhisperX device={device} compute_type={compute_type}")
                 wx_model = whisperx.load_model(settings.whisper_model, device, compute_type=compute_type)
@@ -59,39 +76,81 @@ def process_job(self, job_id: str, youtube_url: str, options: Dict | None = None
                     append_log(job_id, f"WhisperX alignment skipped: {e}")
                 used_whisperx = True
             except Exception as e:  # noqa: BLE001
-                append_log(job_id, f"WhisperX unavailable; fallback to Whisper: {e}")
+                append_log(job_id, f"WhisperX unavailable; fallback to Whisper on CPU: {e}")
 
         if not used_whisperx:
-            model = whisper.load_model(settings.whisper_model)
+            # Try CUDA first if available, otherwise gracefully fall back to CPU
+            try:
+                import torch  # type: ignore
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                if device == "cuda":
+                    name = torch.cuda.get_device_name(0)
+                    cc = torch.cuda.get_device_capability(0)
+                    append_log(job_id, f"Whisper device=cuda ({name}, capability={cc})")
+                else:
+                    append_log(job_id, "Whisper device=cpu")
+                model = whisper.load_model(settings.whisper_model, device=device)
+            except Exception as e:  # noqa: BLE001
+                append_log(job_id, f"Whisper CUDA load failed, falling back to CPU: {e}")
+                model = whisper.load_model(settings.whisper_model, device="cpu")
+
             result = model.transcribe(str(paths["audio"]), task="translate", language="ko")
             text = (result.get("text") or "").strip()
             segments = result.get("segments") or []
 
+        # Translate to Korean if needed (ensure natural Korean output)
+        if not contains_hangul(text):
+            append_log(job_id, "Translating to Korean...")
+            text = translate_to_korean_natural(text)
         Path(paths["ko_text"]).write_text(text, encoding="utf-8")
 
-        # naive SRT export
+        # Translate full text once for naturalness
+        append_log(job_id, "Translating full transcript to Korean...")
+        ko_full = translate_to_korean_natural(text)
+        Path(paths["ko_text"]).write_text(ko_full, encoding="utf-8")
+
+        # Korean subtitles per-segment by aligning translated text roughly by length
+        # Simple proportional mapping: split ko_full by number of segments
+        if segments:
+            approx_len = max(1, len(ko_full) // len(segments))
+            ko_segments = []
+            idx = 0
+            for _ in segments:
+                ko_segments.append(ko_full[idx : idx + approx_len].strip())
+                idx += approx_len
+            # append remainder to last
+            if ko_segments:
+                ko_segments[-1] = (ko_segments[-1] + " " + ko_full[idx:]).strip()
+        else:
+            ko_segments = []
+
+        # SRT export in Korean
         srt_lines = []
+        def fmt(t: float) -> str:
+            hh = int(t // 3600)
+            mm = int((t % 3600) // 60)
+            ss = int(t % 60)
+            ms = int((t - int(t)) * 1000)
+            return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
+
         for i, segment in enumerate(segments, start=1):
             s = float(segment.get("start", 0.0))
             e = float(segment.get("end", 0.0))
-
-            def fmt(t: float) -> str:
-                hh = int(t // 3600)
-                mm = int((t % 3600) // 60)
-                ss = int(t % 60)
-                ms = int((t - int(t)) * 1000)
-                return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
-
+            text_ko = (ko_segments[i - 1] if i - 1 < len(ko_segments) else "").strip()
+            if not text_ko:
+                text_ko = (segment.get("text") or "").strip()
+                text_ko = translate_to_korean_natural(text_ko)
             srt_lines.append(str(i))
             srt_lines.append(f"{fmt(s)} --> {fmt(e)}")
-            srt_lines.append((segment.get("text") or "").strip())
+            srt_lines.append(text_ko)
             srt_lines.append("")
         Path(paths["subs"]).write_text("\n".join(srt_lines), encoding="utf-8")
 
         set_status(job_id, "RUNNING", progress=55)
         append_log(job_id, "Synthesizing Korean TTS...")
         provider = get_tts_provider()
-        chunks = split_text_for_tts(text)
+        chunks = split_text_for_tts(ko_full)
         provider.synthesize(chunks, Path(paths["tts_audio"]))
 
         set_status(job_id, "RUNNING", progress=80)

@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 
 type JobStatus = "QUEUED" | "RUNNING" | "FAILED" | "DONE";
 
@@ -11,22 +12,42 @@ type JobStatusResponse = {
   error?: string;
 };
 
-export default function JobPage({ params }: { params: { id: string } }) {
-  const jobId = params.id;
+export default function JobPage({ params }: { params: Promise<{ id: string }> }) {
+  const [jobId, setJobId] = useState<string | null>(null);
   const [state, setState] = useState<JobStatusResponse>({ status: "QUEUED", progress: 0 });
   const [logText, setLogText] = useState("");
   const esRef = useRef<EventSource | null>(null);
+  const [sseStatus, setSseStatus] = useState<"connecting" | "open" | "error">("connecting");
+  const [sseError, setSseError] = useState<string | null>(null);
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
+  // params를 async로 처리
+  useEffect(() => {
+    params.then((p) => setJobId(p.id));
+  }, [params]);
+
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
   const resultUrl = useMemo(() => (state.resultUrl ? `${apiBase}${state.resultUrl}` : undefined), [state.resultUrl, apiBase]);
 
   useEffect(() => {
-    fetch(`${apiBase}/jobs/${jobId}`).then((r) => r.json()).then((d: JobStatusResponse) => setState(d)).catch(() => {});
+    if (!jobId) return;
+    fetch(`${apiBase}/jobs/${jobId}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`GET /jobs/${jobId} failed: ${r.status}`);
+        return r.json();
+      })
+      .then((d: JobStatusResponse) => setState(d))
+      .catch((e) => setSseError(String(e?.message || e)));
     const es = new EventSource(`${apiBase}/stream/${jobId}`);
     esRef.current = es;
+    es.onopen = () => {
+      setSseStatus("open");
+      setSseError(null);
+    };
     es.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
+        setLastEventAt(Date.now());
         if (data.type === "status") {
           setState((prev) => ({ ...prev, ...data }));
         } else if (data.type === "result") {
@@ -36,7 +57,9 @@ export default function JobPage({ params }: { params: { id: string } }) {
         }
       } catch {}
     };
-    es.onerror = () => {
+    es.onerror = (err) => {
+      setSseStatus("error");
+      setSseError("SSE connection error; falling back to polling");
       // SSE 연결이 종료되면 폴백으로 주기적 조회
       es.close();
       const iv = setInterval(async () => {
@@ -53,9 +76,20 @@ export default function JobPage({ params }: { params: { id: string } }) {
     return () => es.close();
   }, [apiBase, jobId]);
 
+  if (!jobId) return <div>Loading...</div>;
+
   return (
     <div className="container">
       <h2>Job: {jobId}</h2>
+      <Link href="/">Home</Link>
+      <div className="card" style={{ marginTop: 12 }}>
+        <div style={{ fontSize: 14, opacity: 0.9 }}>
+          <div>SSE 상태: {sseStatus}</div>
+          {lastEventAt && <div>마지막 이벤트: {new Date(lastEventAt).toLocaleString()}</div>}
+          {sseError && <div style={{ color: "#fca5a5" }}>오류: {sseError}</div>}
+          <div>API Base: {apiBase}</div>
+        </div>
+      </div>
       <div className="card" style={{ marginTop: 12 }}>
         <div className="progress"><div style={{ width: `${state.progress}%` }} /></div>
         <p style={{ marginTop: 8 }}>상태: {state.status} ({state.progress}%)</p>

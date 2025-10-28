@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.utils.logging import configure_json_logging
-from app.utils.progress import get_state, get_logs, init_job, get_pubsub
+from app.utils.progress import get_state, get_logs, init_job, get_pubsub, append_log
 from app.tasks import process_job
 from app.schemas import CreateJobRequest, CreateJobResponse, JobStatusResponse
 
@@ -42,6 +42,7 @@ def create_job(req: CreateJobRequest) -> CreateJobResponse:
 
     job_id = uuid.uuid4().hex
     init_job(job_id, str(req.youtubeUrl))
+    append_log(job_id, "Job queued to Celery")
     process_job.apply_async(args=[job_id, str(req.youtubeUrl), req.options or {}], task_id=job_id)
     return CreateJobResponse(jobId=job_id)
 
